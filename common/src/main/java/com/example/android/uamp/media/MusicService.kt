@@ -18,9 +18,7 @@ package com.example.android.uamp.media
 
 import android.app.Notification
 import android.app.PendingIntent
-import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.ResultReceiver
@@ -35,9 +33,12 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.media.MediaBrowserServiceCompat
 import androidx.media.MediaBrowserServiceCompat.BrowserRoot.EXTRA_RECENT
+import com.example.android.uamp.language
+import com.example.android.uamp.languageDebugTag
 import com.example.android.uamp.media.extensions.album
 import com.example.android.uamp.media.extensions.flag
 import com.example.android.uamp.media.extensions.id
+import com.example.android.uamp.media.extensions.title
 import com.example.android.uamp.media.extensions.toMediaItem
 import com.example.android.uamp.media.extensions.trackNumber
 import com.example.android.uamp.media.library.AbstractMusicSource
@@ -45,6 +46,8 @@ import com.example.android.uamp.media.library.BrowseTree
 import com.example.android.uamp.media.library.JsonSource
 import com.example.android.uamp.media.library.MEDIA_SEARCH_SUPPORTED
 import com.example.android.uamp.media.library.MusicSource
+import com.example.android.uamp.media.library.STATE_INITIALIZED
+import com.example.android.uamp.media.library.STATE_INITIALIZING
 import com.example.android.uamp.media.library.UAMP_BROWSABLE_ROOT
 import com.example.android.uamp.media.library.UAMP_EMPTY_ROOT
 import com.example.android.uamp.media.library.UAMP_RECENT_ROOT
@@ -55,7 +58,6 @@ import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.Player.EVENT_MEDIA_ITEM_TRANSITION
 import com.google.android.exoplayer2.Player.EVENT_PLAY_WHEN_READY_CHANGED
 import com.google.android.exoplayer2.Player.EVENT_POSITION_DISCONTINUITY
-import com.google.android.exoplayer2.Player.EVENT_TIMELINE_CHANGED
 import com.google.android.exoplayer2.SimpleExoPlayer
 import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.ext.cast.CastPlayer
@@ -63,7 +65,6 @@ import com.google.android.exoplayer2.ext.cast.SessionAvailabilityListener
 import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
 import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
 import com.google.android.exoplayer2.ui.PlayerNotificationManager
-import com.google.android.exoplayer2.util.Util
 import com.google.android.exoplayer2.util.Util.constrainValue
 import com.google.android.gms.cast.framework.CastContext
 import kotlinx.coroutines.CoroutineScope
@@ -71,8 +72,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlin.math.max
-import kotlin.math.min
+import org.intellij.lang.annotations.Language
 
 /**
  * This class is the entry point for browsing and playback commands from the APP's UI
@@ -110,13 +110,21 @@ open class MusicService : MediaBrowserServiceCompat() {
 
     private lateinit var storage: PersistentStorage
 
-    /**
-     * This must be `by lazy` because the source won't initially be ready.
-     * See [MusicService.onLoadChildren] to see where it's accessed (and first
-     * constructed).
-     */
-    private val browseTree: BrowseTree by lazy {
-        BrowseTree(applicationContext, mediaSource)
+    // Quick workaround to recreate the BrowseTree if the language changed
+    // after a configuration change.
+    private var lastRequestedLanguage: String? = null
+    private var browseTreeCache: BrowseTree? = null
+    private val browseTree: BrowseTree get() {
+        val currentLanguage = language
+        if(lastRequestedLanguage != currentLanguage) {
+            Log.i(languageDebugTag, "Updating BrowseTree. Language (${lastRequestedLanguage ?: "-"}) changed to $currentLanguage")
+            browseTreeCache = null
+            lastRequestedLanguage = currentLanguage
+
+            // Fix for updating the tabs. Notify the media app of the changed language!
+            notifyChildrenChanged(UAMP_BROWSABLE_ROOT)
+        }
+        return browseTreeCache ?: BrowseTree(applicationContext, mediaSource)
     }
 
     private var isForegroundService = false
@@ -323,9 +331,31 @@ open class MusicService : MediaBrowserServiceCompat() {
         if (parentMediaId == UAMP_RECENT_ROOT) {
             result.sendResult(storage.loadRecentSong()?.let { song -> listOf(song) })
         } else {
+            // Always delay when returning tab names to simulate loading...
+            (mediaSource as? AbstractMusicSource)?.run {
+                if(parentMediaId == UAMP_BROWSABLE_ROOT && state == STATE_INITIALIZED) {
+                    state = STATE_INITIALIZING // Reset state
+                    serviceScope.launch {
+                        load()
+                    }
+                }
+            }
+
             // If the media source is ready, the results will be set synchronously here.
             val resultsSent = mediaSource.whenReady { successfullyInitialized ->
                 if (successfullyInitialized) {
+
+                    // Log MediaItems that contain labels for the tabs when requested
+                    // by the media app.
+                    if(parentMediaId == UAMP_BROWSABLE_ROOT) {
+                        Log.i(languageDebugTag, buildString {
+                            appendln("Language: ${language}. Returning items for browsable root (tab titles):")
+                            browseTree[parentMediaId]?.forEach { item ->
+                                appendln("| - ${item.title}")
+                            }
+                        })
+                    }
+
                     val children = browseTree[parentMediaId]?.map { item ->
                         MediaItem(item.description, item.flag)
                     }

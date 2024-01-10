@@ -97,6 +97,12 @@ abstract class AbstractMusicSource : MusicSource {
                     onReadyListeners.forEach { listener ->
                         listener(state == STATE_INITIALIZED)
                     }
+
+                    // Remove all listeners now that we're reloading the music source
+                    // from time to time.
+                    // Otherwise each reload would trigger old listeners (and their result)
+                    // to be called again creating spam in the logs.
+                    onReadyListeners.clear()
                 }
             } else {
                 field = value
